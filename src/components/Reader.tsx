@@ -24,6 +24,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
   const [chapterIdx, setChapterIdx] = useState(initialProgress?.chapterIndex || 0);
   const [paraIdx, setParaIdx] = useState(initialProgress?.paragraphIndex || 0);
   const [sentenceIdx, setSentenceIdx] = useState(initialProgress?.sentenceIndex || 0);
+  const [wordIdx, setWordIdx] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [uiMode, setUiMode] = useState(2); // 0: Minimal, 1: Medium, 2: Full
@@ -35,6 +36,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
   const containerRef = useRef<HTMLDivElement>(null);
   
   const generationIdRef = useRef(0);
+  const wordUpdateTimerRef = useRef<number | null>(null);
   const preloadedNextAudioRef = useRef<{ text: string, audio: HTMLAudioElement | null } | null>(null);
 
   const currentChapter = book.content[chapterIdx] || [];
@@ -54,6 +56,55 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
       currentAudio.current.playbackRate = playbackSpeed;
     }
   }, [playbackSpeed]);
+
+  const stopWordTimer = useCallback(() => {
+    if (wordUpdateTimerRef.current !== null) {
+      cancelAnimationFrame(wordUpdateTimerRef.current);
+      wordUpdateTimerRef.current = null;
+    }
+  }, []);
+
+  const startWordTimer = useCallback((audio: HTMLAudioElement, text: string) => {
+    stopWordTimer();
+    
+    const totalChars = text.length;
+    if (totalChars === 0) return;
+
+    const wordBoundaries: number[] = [];
+    const tokens = text.match(/\S+|\s+/g) || [];
+    
+    let charCount = 0;
+    tokens.forEach(token => {
+      if (/\S/.test(token)) {
+        wordBoundaries.push(charCount + token.length);
+      }
+      charCount += token.length;
+    });
+
+    const updateWordIdx = () => {
+      if (!audio || audio.paused || audio.ended) {
+        stopWordTimer();
+        return;
+      }
+
+      const progress = audio.currentTime / audio.duration;
+      const currentCharPos = progress * totalChars;
+      
+      let foundIdx = 0;
+      for (let i = 0; i < wordBoundaries.length; i++) {
+        if (currentCharPos <= wordBoundaries[i]) {
+          foundIdx = i;
+          break;
+        }
+        foundIdx = i;
+      }
+      
+      setWordIdx(foundIdx);
+      wordUpdateTimerRef.current = requestAnimationFrame(updateWordIdx);
+    };
+
+    wordUpdateTimerRef.current = requestAnimationFrame(updateWordIdx);
+  }, [stopWordTimer]);
 
   const handleNextSentence = useCallback(() => {
     if (sentenceIdx < currentSentences.length - 1) {
@@ -102,6 +153,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
       try {
         currentAudio.current.playbackRate = playbackSpeedRef.current;
         await currentAudio.current.play();
+        startWordTimer(currentAudio.current, text);
         return;
       } catch (e) {}
     }
@@ -113,6 +165,9 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
         currentAudio.current = null;
         currentAudioTextRef.current = null;
       }
+      stopWordTimer();
+      setWordIdx(-1);
+      
       const sanitized = sanitizeTextForTTS(text);
       if (!sanitized) {
          if (isPlayingRef.current) handleNextSentenceRef.current();
@@ -134,6 +189,8 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
         currentAudio.current = audio;
         currentAudioTextRef.current = text;
         audio.onended = () => {
+          stopWordTimer();
+          setWordIdx(-1);
           if (isPlayingRef.current) {
             handleNextSentenceRef.current();
           }
@@ -148,6 +205,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
         }
         if (nextText) prefetchNext(nextText);
         await audio.play();
+        startWordTimer(audio, text);
       } else if (isPlayingRef.current) {
         handleNextSentenceRef.current();
       }
@@ -155,22 +213,24 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
       console.error('Playback error:', err);
       if (currentGenId === generationIdRef.current) setIsPlaying(false);
     }
-  }, [generate, chapterIdx, paraIdx, sentenceIdx, currentSentences, currentChapter, book.content, prefetchNext]);
+  }, [generate, chapterIdx, paraIdx, sentenceIdx, currentSentences, currentChapter, book.content, prefetchNext, stopWordTimer, startWordTimer]);
 
   useEffect(() => {
     if (isPlaying) {
       playSentence(currentSentence);
     } else if (currentAudio.current) {
       currentAudio.current.pause();
+      stopWordTimer();
     }
-  }, [isPlaying, chapterIdx, paraIdx, sentenceIdx, playSentence, currentSentence]);
+  }, [isPlaying, chapterIdx, paraIdx, sentenceIdx, playSentence, currentSentence, stopWordTimer]);
 
   useEffect(() => {
     return () => {
+      stopWordTimer();
       if (currentAudio.current) releaseAudio(currentAudio.current);
       if (preloadedNextAudioRef.current?.audio) releaseAudio(preloadedNextAudioRef.current.audio);
     };
-  }, []);
+  }, [stopWordTimer]);
 
   const handlePrevSentence = useCallback(() => {
     if (sentenceIdx > 0) {
@@ -199,21 +259,20 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
         case 'p':
         case ' ': e.preventDefault(); setIsPlaying(p => !p); break;
         case 'a': e.preventDefault(); setAutoScroll(a => !a); break;
-        case 'j': e.preventDefault(); handlePrevSentence(); break; // j is prev in lue
-        case 'k': e.preventDefault(); handleNextSentence(); break; // k is next in lue
-        case 'h': e.preventDefault(); // h is prev paragraph
-          e.preventDefault();
+        case 'j': e.preventDefault(); handlePrevSentence(); break;
+        case 'k': e.preventDefault(); handleNextSentence(); break;
+        case 'h': e.preventDefault();
           if (paraIdx > 0) { setParaIdx(p => p - 1); setSentenceIdx(0); }
           else if (chapterIdx > 0) { setChapterIdx(c => c - 1); setParaIdx(book.content[chapterIdx - 1].length - 1); setSentenceIdx(0); }
           break;
-        case 'l': e.preventDefault(); // l is next paragraph
+        case 'l': e.preventDefault();
           if (paraIdx < currentChapter.length - 1) { setParaIdx(p => p + 1); setSentenceIdx(0); }
           else if (chapterIdx < book.content.length - 1) { setChapterIdx(c => c + 1); setParaIdx(0); setSentenceIdx(0); }
           break;
-        case 'i': e.preventDefault(); containerRef.current?.scrollBy({ top: -scrollAmt, behavior: 'smooth' }); break;
-        case 'm': e.preventDefault(); containerRef.current?.scrollBy({ top: scrollAmt, behavior: 'smooth' }); break;
-        case 'u': e.preventDefault(); containerRef.current?.scrollBy({ top: -100, behavior: 'smooth' }); break;
-        case 'n': e.preventDefault(); containerRef.current?.scrollBy({ top: 100, behavior: 'smooth' }); break;
+        case 'i': e.preventDefault(); containerRef.current?.scrollBy({ top: -scrollAmt, behavior: 'auto' }); break;
+        case 'm': e.preventDefault(); containerRef.current?.scrollBy({ top: scrollAmt, behavior: 'auto' }); break;
+        case 'u': e.preventDefault(); containerRef.current?.scrollBy({ top: -100, behavior: 'auto' }); break;
+        case 'n': e.preventDefault(); containerRef.current?.scrollBy({ top: 100, behavior: 'auto' }); break;
         case 'y': e.preventDefault(); setChapterIdx(0); setParaIdx(0); setSentenceIdx(0); break;
         case 'b': e.preventDefault(); setChapterIdx(book.content.length - 1); setParaIdx(book.content[book.content.length - 1].length - 1); setSentenceIdx(0); break;
         case 'q': e.preventDefault(); onExit(); break;
@@ -229,11 +288,10 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
   useEffect(() => {
     if (autoScroll) {
       const activeElement = document.querySelector('.active-sentence');
-      if (activeElement) activeElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (activeElement) activeElement.scrollIntoView({ behavior: 'auto', block: 'center' });
     }
   }, [chapterIdx, paraIdx, sentenceIdx, autoScroll]);
 
-  // Hardware Media Keys Support
   useEffect(() => {
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({
@@ -241,13 +299,11 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
         artist: 'Lue Web TTS',
         album: 'Lue Reader'
       });
-
       navigator.mediaSession.setActionHandler('play', () => setIsPlaying(true));
       navigator.mediaSession.setActionHandler('pause', () => setIsPlaying(false));
       navigator.mediaSession.setActionHandler('previoustrack', () => handlePrevSentence());
       navigator.mediaSession.setActionHandler('nexttrack', () => handleNextSentence());
     }
-
     return () => {
       if ('mediaSession' in navigator) {
         navigator.mediaSession.setActionHandler('play', null);
@@ -262,7 +318,6 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
 
   return (
     <div className="flex flex-col h-screen bg-black text-zinc-300 font-mono overflow-hidden">
-      {/* Top Bar (Medium & Full Mode) */}
       {uiMode >= 1 && (
         <div className="px-4 py-1 border-b border-blue-900 bg-black text-xs">
           <div className="flex justify-between items-center text-blue-400 font-bold mb-1">
@@ -273,7 +328,6 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
                <span className="text-blue-600 mr-2">PROGRESS:</span> {progressPercent}% [CH {chapterIdx + 1}/{book.content.length}]
             </div>
           </div>
-          {/* Progress Bar Line */}
           <div className="w-full flex text-[8px] leading-[8px] text-blue-900">
             {Array.from({length: 100}).map((_, i) => (
               <span key={i} className={i < progressPercent ? "text-blue-500" : ""}>{i < progressPercent ? "▓" : "░"}</span>
@@ -282,23 +336,36 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
         </div>
       )}
 
-      {/* Main Content Area */}
       <div ref={containerRef} className="flex-1 overflow-y-auto px-6 py-4 md:px-16 lg:px-32">
         <div className="max-w-5xl mx-auto space-y-6 pb-64">
           {currentChapter.map((para, pIdx) => {
             const sentences = splitIntoSentences(para);
             const isCurrentPara = pIdx === paraIdx;
             return (
-              <div key={pIdx} className={`p-1 rounded ${isCurrentPara ? 'border-l-2 border-magenta-500' : 'border-l-2 border-transparent'}`}>
+              <div key={pIdx} className={`py-1 ${isCurrentPara ? 'bg-purple-900/30' : ''}`}>
                 {sentences.map((sent, sIdx) => {
                   const isActive = isCurrentPara && sIdx === sentenceIdx;
+                  if (isActive) {
+                    const words = sent.split(/(\s+)/);
+                    let currentWordCount = 0;
+                    return (
+                      <span key={sIdx} className="bg-purple-800 text-white font-bold active-sentence px-1 rounded-sm">
+                        {words.map((w, wIdx) => {
+                          if (/\S/.test(w)) {
+                            const isWordActive = currentWordCount === wordIdx;
+                            currentWordCount++;
+                            return <span key={wIdx} className={isWordActive ? "text-yellow-400 bg-black px-0.5" : ""}>{w}</span>;
+                          }
+                          return <span key={wIdx}>{w}</span>;
+                        })}
+                      </span>
+                    );
+                  }
                   return (
                     <span
                       key={sIdx}
                       onClick={() => { setParaIdx(pIdx); setSentenceIdx(sIdx); setIsPlaying(true); }}
-                      className={`inline cursor-pointer leading-relaxed text-lg transition-all
-                        ${isActive ? 'bg-magenta-900/40 text-yellow-400 font-bold active-sentence px-1' : 'hover:text-white'}
-                      `}
+                      className="inline cursor-pointer leading-relaxed text-lg hover:text-white"
                     >
                       {sent}{' '}
                     </span>
@@ -310,16 +377,14 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
         </div>
       </div>
 
-      {/* Bottom Bar (Full Mode) */}
       {uiMode === 2 && (
         <div className="border-t border-blue-900 bg-black px-4 py-2">
-          {/* Status Line */}
           <div className="flex items-center justify-between text-[10px] font-bold mb-1">
             <div className="flex items-center gap-4">
                <div className={isPlaying ? "text-green-500" : "text-yellow-500"}>
                  <span className="text-white mr-1">[P]</span> {isPlaying ? "▶ PLAYING" : "⏸ PAUSED"} {playbackSpeed.toFixed(2)}x
                </div>
-               <div className={autoScroll ? "text-magenta-500" : "text-blue-500"}>
+               <div className={autoScroll ? "text-purple-500" : "text-blue-500"}>
                  <span className="text-white mr-1">[A]</span> {autoScroll ? "▼ AUTO" : "⏹ MANUAL"}
                </div>
             </div>
@@ -327,7 +392,6 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
             <div className="text-red-500"><span className="text-white mr-1">[Q]</span> QUIT</div>
           </div>
 
-          {/* Controls Legend Line */}
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-[9px] text-zinc-500 border-t border-zinc-900 pt-1">
             <div className="flex gap-1 items-center"><span className="text-white">H⸱J</span> <span className="text-green-500">↥</span> <span className="text-white">K⸱L</span> <span className="text-green-500">↧</span> <span className="ml-1 uppercase">Para/Sent</span></div>
             <div className="flex gap-1 items-center"><span className="text-white">U⸱N</span> <span className="text-blue-500">↑↓</span> <span className="ml-1 uppercase">Line</span></div>
@@ -338,13 +402,6 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
           </div>
         </div>
       )}
-
-      {/* Tailwind custom colors for lue compatibility */}
-      <style dangerouslySetInnerHTML={{ __html: `
-        .text-magenta-500 { color: #ff00ff; }
-        .bg-magenta-900\\/40 { background-color: rgba(255, 0, 255, 0.2); }
-        .border-magenta-500 { border-color: #ff00ff; }
-      `}} />
     </div>
   );
 };
