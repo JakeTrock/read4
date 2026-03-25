@@ -23,13 +23,13 @@ export interface Settings {
   value: any;
 }
 
-export class LueDatabase extends Dexie {
+export class Read4Database extends Dexie {
   books!: Table<Book>;
   progress!: Table<Progress>;
   settings!: Table<Settings>;
 
   constructor() {
-    super('LueDatabase');
+    super('Read4Database');
     this.version(1).stores({
       books: '++id, title, lastReadAt',
       progress: 'bookId',
@@ -38,4 +38,4 @@ export class LueDatabase extends Dexie {
   }
 }
 
-export const db = new LueDatabase();
+export const db = new Read4Database();

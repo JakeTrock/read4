@@ -132,7 +132,7 @@ function App() {
         {/* Terminal Header */}
         <div className="border border-blue-900 bg-black">
           <div className="bg-blue-900 text-white font-bold px-4 py-1 flex justify-between items-center text-sm md:text-base">
-            <span className="flex gap-4"><span>LUE WEB</span> <span className="text-blue-300 font-normal">///</span> <span>LIBRARY</span></span>
+            <span className="flex gap-4"><span>READ4</span> <span className="text-blue-300 font-normal">///</span> <span>LIBRARY</span></span>
             <span className={`text-xs ${ttsLoading ? 'text-yellow-400 animate-pulse' : 'text-green-400'}`}>
               {ttsLoading ? 'INIT KOKORO-TTS...' : 'WEBGPU READY'}
             </span>

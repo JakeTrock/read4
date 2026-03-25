@@ -12,7 +12,7 @@ export function splitIntoSentences(paragraph: string): string[] {
     ];
     
     const abbrevPattern = new RegExp(`\\b(${abbreviations.join('|')})\\.`, 'gi');
-    const placeholder = "<LUE_PERIOD>";
+    const placeholder = "<READ4_PERIOD>";
     
     // 1. Protect periods in abbreviations
     let processed = paragraph.replace(abbrevPattern, (p1) => `${p1}${placeholder}`);

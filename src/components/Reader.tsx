@@ -296,8 +296,8 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: book.title,
-        artist: 'Lue Web TTS',
-        album: 'Lue Reader'
+        artist: 'read4 TTS',
+        album: 'read4'
       });
       navigator.mediaSession.setActionHandler('play', () => setIsPlaying(true));
       navigator.mediaSession.setActionHandler('pause', () => setIsPlaying(false));
