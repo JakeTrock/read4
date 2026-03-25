@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { Book, Progress } from '../services/db';
 import { useKokoro } from '../hooks/useKokoro';
 import { splitIntoSentences, sanitizeTextForTTS } from '../utils/textProcessing';
-import { Play, Pause, SkipBack, SkipForward, Settings as SettingsIcon, Volume2 } from 'lucide-react';
 
 interface ReaderProps {
   book: Book;
@@ -28,6 +27,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [uiMode, setUiMode] = useState(2); // 0: Minimal, 1: Medium, 2: Full
+  const [autoScroll, setAutoScroll] = useState(true);
   
   const { generate, loading: ttsLoading } = useKokoro();
   const currentAudio = useRef<HTMLAudioElement | null>(null);
@@ -79,23 +79,15 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
     if (!nextText) return;
     const sanitized = sanitizeTextForTTS(nextText);
     if (!sanitized) return;
-    
-    // Already prefetching/prefetched this exact text
     if (preloadedNextAudioRef.current?.text === nextText) return;
-
-    // Release old prefetch if unused
     if (preloadedNextAudioRef.current?.audio) {
       releaseAudio(preloadedNextAudioRef.current.audio);
     }
-
     preloadedNextAudioRef.current = { text: nextText, audio: null };
-    
     generate(sanitized).then(audio => {
-      // If the prefetch target hasn't changed since we started generating
       if (preloadedNextAudioRef.current?.text === nextText) {
         preloadedNextAudioRef.current.audio = audio;
       } else if (audio) {
-        // We generated it but the user skipped past it already, discard it
         releaseAudio(audio);
       }
     }).catch(e => console.error("Prefetch error", e));
@@ -106,88 +98,62 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
       if (isPlayingRef.current) handleNextSentenceRef.current();
       return;
     }
-    
-    // If we are just unpausing the EXACT same sentence that is already loaded, just resume it!
     if (currentAudio.current && currentAudioTextRef.current === text) {
       try {
         currentAudio.current.playbackRate = playbackSpeedRef.current;
         await currentAudio.current.play();
         return;
-      } catch (e) {
-        // Fallthrough and regenerate if resume fails for some reason
-      }
+      } catch (e) {}
     }
 
     const currentGenId = ++generationIdRef.current;
-    
     try {
       if (currentAudio.current) {
         releaseAudio(currentAudio.current);
         currentAudio.current = null;
         currentAudioTextRef.current = null;
       }
-      
       const sanitized = sanitizeTextForTTS(text);
       if (!sanitized) {
          if (isPlayingRef.current) handleNextSentenceRef.current();
          return;
       }
-
       let audio: HTMLAudioElement | null = null;
-      
-      // Check if we already prefetched this sentence
       if (preloadedNextAudioRef.current?.text === text && preloadedNextAudioRef.current?.audio) {
         audio = preloadedNextAudioRef.current.audio;
-        preloadedNextAudioRef.current = null; // Consume it
+        preloadedNextAudioRef.current = null;
       } else {
-        // Not prefetched, generate it on demand
         audio = await generate(sanitized);
       }
-      
-      // Abort if the user skipped to another sentence while we were waiting, or paused
       if (currentGenId !== generationIdRef.current || !isPlayingRef.current) {
         releaseAudio(audio);
         return;
       }
-      
       if (audio) {
         audio.playbackRate = playbackSpeedRef.current;
         currentAudio.current = audio;
         currentAudioTextRef.current = text;
-        
         audio.onended = () => {
           if (isPlayingRef.current) {
             handleNextSentenceRef.current();
           }
         };
-        
-        // Find the next sentence and prefetch it silently in the background
         let nextText = null;
         if (sentenceIdx < currentSentences.length - 1) {
           nextText = currentSentences[sentenceIdx + 1];
         } else if (paraIdx < currentChapter.length - 1) {
-          const nextPara = currentChapter[paraIdx + 1];
-          nextText = splitIntoSentences(nextPara)[0];
+          nextText = splitIntoSentences(currentChapter[paraIdx + 1])[0];
         } else if (chapterIdx < book.content.length - 1) {
-          const nextChapter = book.content[chapterIdx + 1];
-          nextText = splitIntoSentences(nextChapter[0] || '')[0];
+          nextText = splitIntoSentences(book.content[chapterIdx + 1][0] || '')[0];
         }
-        
-        if (nextText) {
-          prefetchNext(nextText);
-        }
-
+        if (nextText) prefetchNext(nextText);
         await audio.play();
-      } else {
-        // Generation failed or returned null for this text
-        if (isPlayingRef.current) handleNextSentenceRef.current();
+      } else if (isPlayingRef.current) {
+        handleNextSentenceRef.current();
       }
     } catch (err) {
       console.error('Playback error:', err);
-      // Only stop playing if we didn't skip to another sentence
-      if (currentGenId === generationIdRef.current) {
-        setIsPlaying(false);
-      }
+      if (currentGenId === generationIdRef.current) setIsPlaying(false);
     }
   }, [generate, chapterIdx, paraIdx, sentenceIdx, currentSentences, currentChapter, book.content, prefetchNext]);
 
@@ -199,7 +165,6 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
     }
   }, [isPlaying, chapterIdx, paraIdx, sentenceIdx, playSentence, currentSentence]);
 
-  // Clean up on unmount
   useEffect(() => {
     return () => {
       if (currentAudio.current) releaseAudio(currentAudio.current);
@@ -228,97 +193,86 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const scrollAmt = window.innerHeight * 0.8;
       switch (e.key.toLowerCase()) {
         case 'p':
-        case ' ':
+        case ' ': e.preventDefault(); setIsPlaying(p => !p); break;
+        case 'a': e.preventDefault(); setAutoScroll(a => !a); break;
+        case 'j': e.preventDefault(); handlePrevSentence(); break; // j is prev in lue
+        case 'k': e.preventDefault(); handleNextSentence(); break; // k is next in lue
+        case 'h': e.preventDefault(); // h is prev paragraph
           e.preventDefault();
-          setIsPlaying(p => !p);
+          if (paraIdx > 0) { setParaIdx(p => p - 1); setSentenceIdx(0); }
+          else if (chapterIdx > 0) { setChapterIdx(c => c - 1); setParaIdx(book.content[chapterIdx - 1].length - 1); setSentenceIdx(0); }
           break;
-        case 'j':
-          handleNextSentence();
+        case 'l': e.preventDefault(); // l is next paragraph
+          if (paraIdx < currentChapter.length - 1) { setParaIdx(p => p + 1); setSentenceIdx(0); }
+          else if (chapterIdx < book.content.length - 1) { setChapterIdx(c => c + 1); setParaIdx(0); setSentenceIdx(0); }
           break;
-        case 'k':
-          handlePrevSentence();
-          break;
-        case 'l':
-          // Next paragraph
-          if (paraIdx < currentChapter.length - 1) {
-            setParaIdx(p => p + 1);
-            setSentenceIdx(0);
-          }
-          break;
-        case 'h':
-          // Prev paragraph
-          if (paraIdx > 0) {
-            setParaIdx(p => p - 1);
-            setSentenceIdx(0);
-          }
-          break;
-        case 'q':
-          onExit();
-          break;
-        case 'v':
-          setUiMode(m => (m + 1) % 3);
-          break;
+        case 'i': e.preventDefault(); containerRef.current?.scrollBy({ top: -scrollAmt, behavior: 'smooth' }); break;
+        case 'm': e.preventDefault(); containerRef.current?.scrollBy({ top: scrollAmt, behavior: 'smooth' }); break;
+        case 'u': e.preventDefault(); containerRef.current?.scrollBy({ top: -100, behavior: 'smooth' }); break;
+        case 'n': e.preventDefault(); containerRef.current?.scrollBy({ top: 100, behavior: 'smooth' }); break;
+        case 'y': e.preventDefault(); setChapterIdx(0); setParaIdx(0); setSentenceIdx(0); break;
+        case 'b': e.preventDefault(); setChapterIdx(book.content.length - 1); setParaIdx(book.content[book.content.length - 1].length - 1); setSentenceIdx(0); break;
+        case 'q': e.preventDefault(); onExit(); break;
+        case 'v': e.preventDefault(); setUiMode(m => (m + 1) % 3); break;
+        case ',': e.preventDefault(); setPlaybackSpeed(s => Math.max(0.5, s - 0.25)); break;
+        case '.': e.preventDefault(); setPlaybackSpeed(s => Math.min(3.0, s + 0.25)); break;
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleNextSentence, handlePrevSentence, onExit, paraIdx, currentChapter.length]);
+  }, [handleNextSentence, handlePrevSentence, onExit, paraIdx, chapterIdx, book.content, currentChapter.length]);
 
-  // Auto-scroll to active sentence
   useEffect(() => {
-    const activeElement = document.querySelector('.active-sentence');
-    if (activeElement) {
-      activeElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (autoScroll) {
+      const activeElement = document.querySelector('.active-sentence');
+      if (activeElement) activeElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [chapterIdx, paraIdx, sentenceIdx]);
+  }, [chapterIdx, paraIdx, sentenceIdx, autoScroll]);
+
+  const progressPercent = Math.round(((chapterIdx * 100) / book.content.length) + ((paraIdx * 100) / (book.content.length * currentChapter.length)));
 
   return (
-    <div className="flex flex-col h-screen bg-black text-white font-serif overflow-hidden">
-      {/* Top Bar */}
+    <div className="flex flex-col h-screen bg-black text-zinc-300 font-mono overflow-hidden">
+      {/* Top Bar (Medium & Full Mode) */}
       {uiMode >= 1 && (
-        <div className="flex justify-between items-center px-4 py-2 border-b border-zinc-800 bg-zinc-900 z-10">
-          <div className="text-sm font-medium truncate max-w-md">{book.title}</div>
-          <div className="flex items-center gap-4">
-            <span className="text-xs text-zinc-400">
-              Ch {chapterIdx + 1} / {book.content.length}
-            </span>
-            <button onClick={onExit} className="text-zinc-400 hover:text-white">
-              Exit
-            </button>
+        <div className="px-4 py-1 border-b border-blue-900 bg-black text-xs">
+          <div className="flex justify-between items-center text-blue-400 font-bold mb-1">
+            <div className="truncate flex-1 uppercase tracking-tighter">
+              <span className="text-blue-600 mr-2">TITLE:</span> {book.title}
+            </div>
+            <div className="ml-4 whitespace-nowrap">
+               <span className="text-blue-600 mr-2">PROGRESS:</span> {progressPercent}% [CH {chapterIdx + 1}/{book.content.length}]
+            </div>
+          </div>
+          {/* Progress Bar Line */}
+          <div className="w-full flex text-[8px] leading-[8px] text-blue-900">
+            {Array.from({length: 100}).map((_, i) => (
+              <span key={i} className={i < progressPercent ? "text-blue-500" : ""}>{i < progressPercent ? "▓" : "░"}</span>
+            ))}
           </div>
         </div>
       )}
 
       {/* Main Content Area */}
-      <div 
-        ref={containerRef}
-        className="flex-1 overflow-y-auto px-4 py-8 md:px-12 lg:px-24 xl:px-48"
-      >
-        <div className="max-w-3xl mx-auto space-y-6">
+      <div ref={containerRef} className="flex-1 overflow-y-auto px-6 py-4 md:px-16 lg:px-32">
+        <div className="max-w-5xl mx-auto space-y-6 pb-64">
           {currentChapter.map((para, pIdx) => {
             const sentences = splitIntoSentences(para);
             const isCurrentPara = pIdx === paraIdx;
-            
             return (
-              <div 
-                key={pIdx} 
-                className={`transition-opacity duration-300 ${isCurrentPara ? 'opacity-100' : 'opacity-40 hover:opacity-70'}`}
-              >
+              <div key={pIdx} className={`p-1 rounded ${isCurrentPara ? 'border-l-2 border-magenta-500' : 'border-l-2 border-transparent'}`}>
                 {sentences.map((sent, sIdx) => {
                   const isActive = isCurrentPara && sIdx === sentenceIdx;
                   return (
                     <span
                       key={sIdx}
-                      onClick={() => {
-                        setParaIdx(pIdx);
-                        setSentenceIdx(sIdx);
-                        setIsPlaying(true);
-                      }}
-                      className={`inline cursor-pointer transition-colors duration-200 leading-relaxed text-xl
-                        ${isActive ? 'bg-blue-600/30 text-blue-100 font-medium active-sentence rounded px-1' : 'hover:text-blue-300'}
+                      onClick={() => { setParaIdx(pIdx); setSentenceIdx(sIdx); setIsPlaying(true); }}
+                      className={`inline cursor-pointer leading-relaxed text-lg transition-all
+                        ${isActive ? 'bg-magenta-900/40 text-yellow-400 font-bold active-sentence px-1' : 'hover:text-white'}
                       `}
                     >
                       {sent}{' '}
@@ -331,44 +285,41 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
         </div>
       </div>
 
-      {/* Controls Bar */}
+      {/* Bottom Bar (Full Mode) */}
       {uiMode === 2 && (
-        <div className="border-t border-zinc-800 bg-zinc-900 px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-6">
-            <button onClick={handlePrevSentence} className="p-2 hover:bg-zinc-800 rounded-full">
-              <SkipBack size={24} />
-            </button>
-            <button 
-              onClick={() => setIsPlaying(!isPlaying)}
-              className="p-3 bg-white text-black rounded-full hover:bg-zinc-200"
-            >
-              {isPlaying ? <Pause size={28} /> : <Play size={28} className="ml-1" />}
-            </button>
-            <button onClick={handleNextSentence} className="p-2 hover:bg-zinc-800 rounded-full">
-              <SkipForward size={24} />
-            </button>
+        <div className="border-t border-blue-900 bg-black px-4 py-2">
+          {/* Status Line */}
+          <div className="flex items-center justify-between text-[10px] font-bold mb-1">
+            <div className="flex items-center gap-4">
+               <div className={isPlaying ? "text-green-500" : "text-yellow-500"}>
+                 <span className="text-white mr-1">[P]</span> {isPlaying ? "▶ PLAYING" : "⏸ PAUSED"} {playbackSpeed.toFixed(2)}x
+               </div>
+               <div className={autoScroll ? "text-magenta-500" : "text-blue-500"}>
+                 <span className="text-white mr-1">[A]</span> {autoScroll ? "▼ AUTO" : "⏹ MANUAL"}
+               </div>
+            </div>
+            {ttsLoading && <div className="text-yellow-500 animate-pulse">GENERATING...</div>}
+            <div className="text-red-500"><span className="text-white mr-1">[Q]</span> QUIT</div>
           </div>
 
-          <div className="flex items-center gap-8">
-            <div className="flex items-center gap-2">
-              <Volume2 size={20} className="text-zinc-400" />
-              <select 
-                value={playbackSpeed} 
-                onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
-                className="bg-transparent text-sm border-none focus:ring-0 cursor-pointer"
-              >
-                {[1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0].map(s => (
-                  <option key={s} value={s} className="bg-zinc-900">{s}x</option>
-                ))}
-              </select>
-            </div>
-            {ttsLoading && <div className="text-xs text-blue-400 animate-pulse">Generating audio...</div>}
-            <button className="text-zinc-400 hover:text-white">
-              <SettingsIcon size={20} />
-            </button>
+          {/* Controls Legend Line */}
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-[9px] text-zinc-500 border-t border-zinc-900 pt-1">
+            <div className="flex gap-1 items-center"><span className="text-white">H⸱J</span> <span className="text-green-500">↥</span> <span className="text-white">K⸱L</span> <span className="text-green-500">↧</span> <span className="ml-1 uppercase">Para/Sent</span></div>
+            <div className="flex gap-1 items-center"><span className="text-white">U⸱N</span> <span className="text-blue-500">↑↓</span> <span className="ml-1 uppercase">Line</span></div>
+            <div className="flex gap-1 items-center"><span className="text-white">I⸱M</span> <span className="text-blue-500">↑↓</span> <span className="ml-1 uppercase">Page</span></div>
+            <div className="flex gap-1 items-center"><span className="text-white">Y⸱B</span> <span className="ml-1 uppercase">Top/End</span></div>
+            <div className="flex gap-1 items-center"><span className="text-white">,⸱.</span> <span className="ml-1 uppercase">Speed</span></div>
+            <div className="flex gap-1 items-center"><span className="text-white">V</span> <span className="ml-1 uppercase">UI</span></div>
           </div>
         </div>
       )}
+
+      {/* Tailwind custom colors for lue compatibility */}
+      <style dangerouslySetInnerHTML={{ __html: `
+        .text-magenta-500 { color: #ff00ff; }
+        .bg-magenta-900\\/40 { background-color: rgba(255, 0, 255, 0.2); }
+        .border-magenta-500 { border-color: #ff00ff; }
+      `}} />
     </div>
   );
 };
