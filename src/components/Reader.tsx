@@ -233,6 +233,31 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
     }
   }, [chapterIdx, paraIdx, sentenceIdx, autoScroll]);
 
+  // Hardware Media Keys Support
+  useEffect(() => {
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: book.title,
+        artist: 'Lue Web TTS',
+        album: 'Lue Reader'
+      });
+
+      navigator.mediaSession.setActionHandler('play', () => setIsPlaying(true));
+      navigator.mediaSession.setActionHandler('pause', () => setIsPlaying(false));
+      navigator.mediaSession.setActionHandler('previoustrack', () => handlePrevSentence());
+      navigator.mediaSession.setActionHandler('nexttrack', () => handleNextSentence());
+    }
+
+    return () => {
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.setActionHandler('play', null);
+        navigator.mediaSession.setActionHandler('pause', null);
+        navigator.mediaSession.setActionHandler('previoustrack', null);
+        navigator.mediaSession.setActionHandler('nexttrack', null);
+      }
+    };
+  }, [book.title, handlePrevSentence, handleNextSentence]);
+
   const progressPercent = Math.round(((chapterIdx * 100) / book.content.length) + ((paraIdx * 100) / (book.content.length * currentChapter.length)));
 
   return (
