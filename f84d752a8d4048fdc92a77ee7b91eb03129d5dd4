@@ -1,0 +1,23 @@
+src/components/Reader.tsx
+  7d06a9be4bbd947b 30,106,124,145,147,149,151-152,156,196-197,200-204,206-207,209-211,213-222,227,230-232,234,236,239-240,242-249,251-255,261-262,267,273-275,288,290-302,305-312,316-322
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.19",
+  "base_commit_sha": "f84d752a8d4048fdc92a77ee7b91eb03129d5dd4",
+  "prompts": {
+    "7d06a9be4bbd947b": {
+      "agent_id": {
+        "tool": "gemini",
+        "id": "4f79fff8-ca6f-4dc4-9006-d8f1862243cc",
+        "model": "gemini-3-flash-preview"
+      },
+      "human_author": "Jacob Trock <jgh@geocrypt.me>",
+      "messages": [],
+      "total_additions": 198,
+      "total_deletions": 247,
+      "accepted_lines": 91,
+      "overriden_lines": 0
+    }
+  }
+}
