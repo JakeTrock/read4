@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { db } from '../services/db';
 import type { Book, Progress } from '../services/db';
 import { useKokoro } from '../hooks/useKokoro';
@@ -31,6 +32,13 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [uiMode, setUiMode] = useState(2); // 0: Minimal, 1: Medium, 2: Full
   const [autoScroll, setAutoScroll] = useState(true);
+  const [pipWindow, setPipWindow] = useState<Window | null>(null);
+
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<{c: number, p: number, s: number}[]>([]);
+  const [searchIdx, setSearchIdx] = useState(0);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   
   const { generate, loading: ttsLoading } = useKokoro();
   const currentAudio = useRef<HTMLAudioElement | null>(null);
@@ -301,14 +309,118 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
     }
   }, [sentenceIdx, paraIdx, chapterIdx, currentChapter, book.content]);
 
+  const executeSearch = useCallback(() => {
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      setIsSearchOpen(false);
+      return;
+    }
+    const query = searchQuery.toLowerCase();
+    const results: {c: number, p: number, s: number}[] = [];
+    for (let c = 0; c < book.content.length; c++) {
+      for (let p = 0; p < book.content[c].length; p++) {
+        const sentences = splitIntoSentences(book.content[c][p]);
+        for (let s = 0; s < sentences.length; s++) {
+          if (sentences[s].toLowerCase().includes(query)) {
+            results.push({c, p, s});
+          }
+        }
+      }
+    }
+    setSearchResults(results);
+    if (results.length > 0) {
+      let closestIdx = 0;
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (r.c > chapterIdx || (r.c === chapterIdx && r.p > paraIdx) || (r.c === chapterIdx && r.p === paraIdx && r.s >= sentenceIdx)) {
+          closestIdx = i;
+          break;
+        }
+      }
+      setSearchIdx(closestIdx);
+      setChapterIdx(results[closestIdx].c);
+      setParaIdx(results[closestIdx].p);
+      setSentenceIdx(results[closestIdx].s);
+      skipNextScrollRef.current = false;
+    }
+    setIsSearchOpen(false);
+  }, [searchQuery, book.content, chapterIdx, paraIdx, sentenceIdx]);
+
+  const togglePip = useCallback(async () => {
+    if (pipWindow) {
+      pipWindow.close();
+      setPipWindow(null);
+      return;
+    }
+
+    if (!('documentPictureInPicture' in window)) {
+      alert("Document Picture-in-Picture is not supported in your browser. (Try Chrome or Edge desktop)");
+      return;
+    }
+
+    try {
+      const pip = await (window as any).documentPictureInPicture.requestWindow({
+        width: 600,
+        height: 250,
+      });
+
+      // Copy styles over so Tailwind works in the new window
+      [...document.styleSheets].forEach((styleSheet) => {
+        try {
+          const cssRules = [...styleSheet.cssRules].map((rule) => rule.cssText).join('');
+          const style = document.createElement('style');
+          style.textContent = cssRules;
+          pip.document.head.appendChild(style);
+        } catch (e) {
+          if (styleSheet.href) {
+            const link = document.createElement('link');
+            link.rel = 'stylesheet';
+            link.href = styleSheet.href;
+            pip.document.head.appendChild(link);
+          }
+        }
+      });
+
+      pip.addEventListener('pagehide', () => {
+        setPipWindow(null);
+      });
+
+      setPipWindow(pip);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to open PiP window.");
+    }
+  }, [pipWindow]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (isSearchOpen) {
+        if (e.key === 'Escape') {
+          setIsSearchOpen(false);
+          setSearchQuery('');
+          setSearchResults([]);
+        } else if (e.key === 'Enter') {
+          executeSearch();
+        }
+        return;
+      }
+
       const scrollAmt = window.innerHeight * 0.8;
       switch (e.key.toLowerCase()) {
+        case '/': e.preventDefault(); setIsSearchOpen(true); setTimeout(() => searchInputRef.current?.focus(), 10); break;
+        case 'escape':
+          if (searchResults.length > 0) {
+            e.preventDefault();
+            setSearchResults([]);
+            setSearchQuery('');
+          }
+          break;
         case 'p':
         case ' ': e.preventDefault(); setIsPlaying(p => !p); break;
         case 'a': e.preventDefault(); setAutoScroll(a => !a); break;
+        case 'o': e.preventDefault(); togglePip(); break;
         case 'j': e.preventDefault(); handlePrevSentence(); break;
         case 'k': e.preventDefault(); handleNextSentence(); break;
         case 'h': e.preventDefault();
@@ -321,8 +433,28 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
           break;
         case 'i': e.preventDefault(); jumpView(-scrollAmt); break;
         case 'm': e.preventDefault(); jumpView(scrollAmt); break;
-        case 'u': e.preventDefault(); jumpView(-100); break;
-        case 'n': e.preventDefault(); jumpView(100); break;
+        case 'u': 
+          e.preventDefault(); 
+          if (searchResults.length > 0) {
+            const prevIdx = (searchIdx - 1 + searchResults.length) % searchResults.length;
+            setSearchIdx(prevIdx);
+            setChapterIdx(searchResults[prevIdx].c); setParaIdx(searchResults[prevIdx].p); setSentenceIdx(searchResults[prevIdx].s);
+            skipNextScrollRef.current = false;
+          } else {
+            jumpView(-100); 
+          }
+          break;
+        case 'n': 
+          e.preventDefault(); 
+          if (searchResults.length > 0) {
+            const nextIdx = (searchIdx + 1) % searchResults.length;
+            setSearchIdx(nextIdx);
+            setChapterIdx(searchResults[nextIdx].c); setParaIdx(searchResults[nextIdx].p); setSentenceIdx(searchResults[nextIdx].s);
+            skipNextScrollRef.current = false;
+          } else {
+            jumpView(100); 
+          }
+          break;
         case 'y': e.preventDefault(); setChapterIdx(0); setParaIdx(0); setSentenceIdx(0); skipNextScrollRef.current = false; break;
         case 'b': e.preventDefault(); setChapterIdx(book.content.length - 1); setParaIdx(book.content[book.content.length - 1].length - 1); setSentenceIdx(0); skipNextScrollRef.current = false; break;
         case 'q': e.preventDefault(); onExit(); break;
@@ -332,8 +464,13 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleNextSentence, handlePrevSentence, onExit, paraIdx, chapterIdx, book.content, currentChapter.length, jumpView]);
+    if (pipWindow) pipWindow.addEventListener('keydown', handleKeyDown);
+    
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      if (pipWindow) pipWindow.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [handleNextSentence, handlePrevSentence, onExit, paraIdx, chapterIdx, book.content, currentChapter.length, jumpView, togglePip, pipWindow, isSearchOpen, searchResults, searchIdx, executeSearch]);
 
   useEffect(() => {
     if (autoScroll && !skipNextScrollRef.current) {
@@ -440,6 +577,9 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
                <div className={autoScroll ? "text-purple-500" : "text-blue-500"}>
                  <span className="text-white mr-1">[A]</span> {autoScroll ? "▼ AUTO" : "⏹ MANUAL"}
                </div>
+               <div className={pipWindow ? "text-purple-500" : "text-blue-500"}>
+                 <span className="text-white mr-1">[O]</span> PiP
+               </div>
             </div>
             {ttsLoading && <div className="text-yellow-500 animate-pulse">GENERATING...</div>}
             <div className="text-red-500"><span className="text-white mr-1">[Q]</span> QUIT</div>
@@ -450,10 +590,54 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
             <div className="flex gap-1 items-center"><span className="text-white">U⸱N</span> <span className="text-blue-500">↑↓</span> <span className="ml-1 uppercase">Line</span></div>
             <div className="flex gap-1 items-center"><span className="text-white">I⸱M</span> <span className="text-blue-500">↑↓</span> <span className="ml-1 uppercase">Page</span></div>
             <div className="flex gap-1 items-center"><span className="text-white">Y⸱B</span> <span className="ml-1 uppercase">Top/End</span></div>
+            <div className="flex gap-1 items-center"><span className="text-white">/</span> <span className="ml-1 uppercase">Find</span></div>
             <div className="flex gap-1 items-center"><span className="text-white">,⸱.</span> <span className="ml-1 uppercase">Speed</span></div>
             <div className="flex gap-1 items-center"><span className="text-white">V</span> <span className="ml-1 uppercase">UI</span></div>
           </div>
         </div>
+      )}
+
+      {isSearchOpen && (
+        <div className="absolute bottom-0 left-0 w-full bg-blue-900 text-white font-bold px-4 py-2 flex items-center gap-2 z-50">
+          <span className="text-blue-300">/</span>
+          <input
+            ref={searchInputRef}
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            className="bg-transparent border-none outline-none w-full text-white font-mono placeholder-blue-400/50"
+            placeholder="Search..."
+          />
+        </div>
+      )}
+      {!isSearchOpen && searchResults.length > 0 && (
+        <div className="absolute bottom-10 right-4 bg-blue-900 text-white text-xs px-3 py-1 font-bold z-40 shadow-lg border border-blue-700">
+          <span className="text-blue-300">/</span>{searchQuery} [{searchIdx + 1}/{searchResults.length}] <span className="text-blue-400 ml-2">U/N: NAV | ESC: CLR</span>
+        </div>
+      )}
+
+      {pipWindow && createPortal(
+        <div className="h-screen w-screen bg-black text-zinc-300 font-mono p-4 md:p-8 flex flex-col justify-center items-center overflow-hidden selection:bg-purple-900/50">
+           <div className="text-xl md:text-2xl leading-relaxed text-center w-full max-w-3xl bg-purple-900/30 p-6 md:p-10 border-l-4 border-purple-500 shadow-2xl">
+             {currentSentence.split(/(\s+)/).map((w, wIdx) => {
+                if (/\S/.test(w)) {
+                  const activeWordIndex = currentSentence.slice(0, currentSentence.indexOf(w, currentSentence.split(/(\s+)/).slice(0, wIdx).join('').length)).split(/\s+/).filter(x => x).length;
+                  const isWordActive = activeWordIndex === wordIdx;
+                  return (
+                    <span key={wIdx} className={isWordActive ? "text-yellow-400 bg-black px-1 font-bold" : "text-white font-bold"}>
+                      {w}
+                    </span>
+                  );
+                }
+                return <span key={wIdx}>{w}</span>;
+             })}
+           </div>
+           <div className="absolute bottom-4 flex gap-6 text-[10px] text-zinc-500 uppercase font-bold tracking-widest">
+             <span className={isPlaying ? "text-green-500" : "text-yellow-500"}><span className="text-white mr-1">[P]</span>{isPlaying ? "PLAYING" : "PAUSED"}</span>
+             <span><span className="text-white mr-1">[J/K]</span>SENTENCE</span>
+             <span><span className="text-white mr-1">[O]</span>CLOSE</span>
+           </div>
+        </div>,
+        pipWindow.document.body
       )}
     </div>
   );
