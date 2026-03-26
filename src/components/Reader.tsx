@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { db } from '../services/db';
 import type { Book, Progress } from '../services/db';
 import { useKokoro } from '../hooks/useKokoro';
 import { splitIntoSentences, sanitizeTextForTTS } from '../utils/textProcessing';
@@ -6,6 +7,7 @@ import { splitIntoSentences, sanitizeTextForTTS } from '../utils/textProcessing'
 interface ReaderProps {
   book: Book;
   initialProgress?: Progress;
+  voice: string;
   onExit: () => void;
 }
 
@@ -20,7 +22,7 @@ const releaseAudio = (audio: HTMLAudioElement | null) => {
   } catch (e) {}
 };
 
-export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit }) => {
+export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, onExit }) => {
   const [chapterIdx, setChapterIdx] = useState(initialProgress?.chapterIndex || 0);
   const [paraIdx, setParaIdx] = useState(initialProgress?.paragraphIndex || 0);
   const [sentenceIdx, setSentenceIdx] = useState(initialProgress?.sentenceIndex || 0);
@@ -56,6 +58,18 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
       currentAudio.current.playbackRate = playbackSpeed;
     }
   }, [playbackSpeed]);
+
+  useEffect(() => {
+    if (book.id) {
+      db.progress.put({
+        bookId: book.id,
+        chapterIndex: chapterIdx,
+        paragraphIndex: paraIdx,
+        sentenceIndex: sentenceIdx,
+        updatedAt: Date.now()
+      }).catch(e => console.error("Failed to save progress", e));
+    }
+  }, [chapterIdx, paraIdx, sentenceIdx, book.id]);
 
   const stopWordTimer = useCallback(() => {
     if (wordUpdateTimerRef.current !== null) {
@@ -135,14 +149,14 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
       releaseAudio(preloadedNextAudioRef.current.audio);
     }
     preloadedNextAudioRef.current = { text: nextText, audio: null };
-    generate(sanitized).then(audio => {
+    generate(sanitized, voice).then(audio => {
       if (preloadedNextAudioRef.current?.text === nextText) {
         preloadedNextAudioRef.current.audio = audio;
       } else if (audio) {
         releaseAudio(audio);
       }
     }).catch(e => console.error("Prefetch error", e));
-  }, [generate]);
+  }, [generate, voice]);
 
   const playSentence = useCallback(async (text: string) => {
     if (!text) {
@@ -178,7 +192,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
         audio = preloadedNextAudioRef.current.audio;
         preloadedNextAudioRef.current = null;
       } else {
-        audio = await generate(sanitized);
+        audio = await generate(sanitized, voice);
       }
       if (currentGenId !== generationIdRef.current || !isPlayingRef.current) {
         releaseAudio(audio);
@@ -213,7 +227,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
       console.error('Playback error:', err);
       if (currentGenId === generationIdRef.current) setIsPlaying(false);
     }
-  }, [generate, chapterIdx, paraIdx, sentenceIdx, currentSentences, currentChapter, book.content, prefetchNext, stopWordTimer, startWordTimer]);
+  }, [generate, voice, chapterIdx, paraIdx, sentenceIdx, currentSentences, currentChapter, book.content, prefetchNext, stopWordTimer, startWordTimer]);
 
   useEffect(() => {
     if (isPlaying) {
@@ -231,6 +245,42 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
       if (preloadedNextAudioRef.current?.audio) releaseAudio(preloadedNextAudioRef.current.audio);
     };
   }, [stopWordTimer]);
+
+  const skipNextScrollRef = useRef(false);
+
+  const jumpView = useCallback((offset: number) => {
+    if (!containerRef.current) return;
+    const container = containerRef.current;
+    
+    container.scrollBy({ top: offset, behavior: 'auto' });
+    
+    requestAnimationFrame(() => {
+      const containerRect = container.getBoundingClientRect();
+      const targetY = containerRect.top + 30; // slightly below top edge
+      
+      const elements = Array.from(document.querySelectorAll('.sentence-el'));
+      let bestEl = null;
+      let minDiff = Infinity;
+      
+      for (const el of elements) {
+        const rect = el.getBoundingClientRect();
+        // Check vertical distance to targetY
+        const diff = Math.abs(rect.top - targetY);
+        if (diff < minDiff) {
+          minDiff = diff;
+          bestEl = el;
+        }
+      }
+      
+      if (bestEl) {
+        const pIdx = parseInt(bestEl.getAttribute('data-para') || '0', 10);
+        const sIdx = parseInt(bestEl.getAttribute('data-sent') || '0', 10);
+        skipNextScrollRef.current = true;
+        setParaIdx(pIdx);
+        setSentenceIdx(sIdx);
+      }
+    });
+  }, []);
 
   const handlePrevSentence = useCallback(() => {
     if (sentenceIdx > 0) {
@@ -269,12 +319,12 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
           if (paraIdx < currentChapter.length - 1) { setParaIdx(p => p + 1); setSentenceIdx(0); }
           else if (chapterIdx < book.content.length - 1) { setChapterIdx(c => c + 1); setParaIdx(0); setSentenceIdx(0); }
           break;
-        case 'i': e.preventDefault(); containerRef.current?.scrollBy({ top: -scrollAmt, behavior: 'auto' }); break;
-        case 'm': e.preventDefault(); containerRef.current?.scrollBy({ top: scrollAmt, behavior: 'auto' }); break;
-        case 'u': e.preventDefault(); containerRef.current?.scrollBy({ top: -100, behavior: 'auto' }); break;
-        case 'n': e.preventDefault(); containerRef.current?.scrollBy({ top: 100, behavior: 'auto' }); break;
-        case 'y': e.preventDefault(); setChapterIdx(0); setParaIdx(0); setSentenceIdx(0); break;
-        case 'b': e.preventDefault(); setChapterIdx(book.content.length - 1); setParaIdx(book.content[book.content.length - 1].length - 1); setSentenceIdx(0); break;
+        case 'i': e.preventDefault(); jumpView(-scrollAmt); break;
+        case 'm': e.preventDefault(); jumpView(scrollAmt); break;
+        case 'u': e.preventDefault(); jumpView(-100); break;
+        case 'n': e.preventDefault(); jumpView(100); break;
+        case 'y': e.preventDefault(); setChapterIdx(0); setParaIdx(0); setSentenceIdx(0); skipNextScrollRef.current = false; break;
+        case 'b': e.preventDefault(); setChapterIdx(book.content.length - 1); setParaIdx(book.content[book.content.length - 1].length - 1); setSentenceIdx(0); skipNextScrollRef.current = false; break;
         case 'q': e.preventDefault(); onExit(); break;
         case 'v': e.preventDefault(); setUiMode(m => (m + 1) % 3); break;
         case ',': e.preventDefault(); setPlaybackSpeed(s => Math.max(0.5, s - 0.25)); break;
@@ -283,13 +333,14 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleNextSentence, handlePrevSentence, onExit, paraIdx, chapterIdx, book.content, currentChapter.length]);
+  }, [handleNextSentence, handlePrevSentence, onExit, paraIdx, chapterIdx, book.content, currentChapter.length, jumpView]);
 
   useEffect(() => {
-    if (autoScroll) {
+    if (autoScroll && !skipNextScrollRef.current) {
       const activeElement = document.querySelector('.active-sentence');
       if (activeElement) activeElement.scrollIntoView({ behavior: 'auto', block: 'center' });
     }
+    skipNextScrollRef.current = false;
   }, [chapterIdx, paraIdx, sentenceIdx, autoScroll]);
 
   useEffect(() => {
@@ -349,7 +400,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
                     const words = sent.split(/(\s+)/);
                     let currentWordCount = 0;
                     return (
-                      <span key={sIdx} className="bg-purple-800 text-white font-bold active-sentence px-1 rounded-sm">
+                      <span key={sIdx} data-para={pIdx} data-sent={sIdx} className="sentence-el bg-purple-800 text-white font-bold active-sentence px-1 rounded-sm">
                         {words.map((w, wIdx) => {
                           if (/\S/.test(w)) {
                             const isWordActive = currentWordCount === wordIdx;
@@ -364,8 +415,10 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, onExit })
                   return (
                     <span
                       key={sIdx}
+                      data-para={pIdx}
+                      data-sent={sIdx}
                       onClick={() => { setParaIdx(pIdx); setSentenceIdx(sIdx); setIsPlaying(true); }}
-                      className="inline cursor-pointer leading-relaxed text-lg hover:text-white"
+                      className="sentence-el inline cursor-pointer leading-relaxed text-lg hover:text-white"
                     >
                       {sent}{' '}
                     </span>

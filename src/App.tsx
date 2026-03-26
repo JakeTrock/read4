@@ -5,20 +5,42 @@ import { extractContent } from './services/contentParser';
 import { Reader } from './components/Reader';
 import { useKokoro } from './hooks/useKokoro';
 
+const VOICES = [
+  { id: 'af_heart', name: 'Heart (US F)' },
+  { id: 'af_bella', name: 'Bella (US F)' },
+  { id: 'af_nicole', name: 'Nicole (US F)' },
+  { id: 'af_sky', name: 'Sky (US F)' },
+  { id: 'am_adam', name: 'Adam (US M)' },
+  { id: 'am_michael', name: 'Michael (US M)' },
+  { id: 'bf_emma', name: 'Emma (UK F)' },
+  { id: 'bf_isabella', name: 'Isabella (UK F)' },
+  { id: 'bm_george', name: 'George (UK M)' },
+  { id: 'bm_daniel', name: 'Daniel (UK M)' },
+];
+
 function App() {
   const [books, setBooks] = useState<Book[]>([]);
   const [activeBook, setActiveBook] = useState<Book | null>(null);
   const [activeProgress, setActiveProgress] = useState<Progress | undefined>();
   const [isImporting, setIsImporting] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [voice, setVoice] = useState('af_heart');
+  const [isReady, setIsReady] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   const { init: initTTS, loading: ttsLoading, error: ttsError } = useKokoro();
 
   useEffect(() => {
-    loadBooks();
+    Promise.all([loadBooks(), loadSettings()]).then(() => {
+      setIsReady(true);
+    });
     initTTS();
   }, [initTTS]);
+
+  const loadSettings = async () => {
+    const v = await db.settings.get('voice');
+    if (v) setVoice(v.value);
+  };
 
   const loadBooks = async () => {
     const allBooks = await db.books.orderBy('lastReadAt').reverse().toArray();
@@ -68,6 +90,11 @@ function App() {
     }
   };
 
+  const handleVoiceChange = async (newVoice: string) => {
+    setVoice(newVoice);
+    await db.settings.put({ key: 'voice', value: newVoice });
+  };
+
   useEffect(() => {
     if (activeBook || isImporting) return;
 
@@ -105,6 +132,16 @@ function App() {
           e.preventDefault();
           fileInputRef.current?.click();
           break;
+        case 'v':
+          e.preventDefault();
+          setVoice(prev => {
+            const currIdx = VOICES.findIndex(v => v.id === prev);
+            const nextIdx = (currIdx + 1) % VOICES.length;
+            const nextVoice = VOICES[nextIdx].id;
+            db.settings.put({ key: 'voice', value: nextVoice });
+            return nextVoice;
+          });
+          break;
       }
     };
 
@@ -112,11 +149,17 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [books, selectedIndex, activeBook, isImporting]);
 
+  if (!isReady) {
+    return <div className="min-h-screen bg-black"></div>;
+  }
+
   if (activeBook) {
     return (
       <Reader 
+        key={activeBook.id}
         book={activeBook} 
         initialProgress={activeProgress} 
+        voice={voice}
         onExit={() => {
           setActiveBook(null);
           loadBooks();
@@ -142,6 +185,16 @@ function App() {
              <span><span className="text-white font-bold mr-1">[J/K]</span> NAVIGATE</span>
              <span><span className="text-white font-bold mr-1">[L/ENTER]</span> READ</span>
              <span><span className="text-white font-bold mr-1">[D/X]</span> DELETE</span>
+             <span className="flex items-center gap-1 ml-auto border-l border-blue-900 pl-4">
+               <span className="text-white font-bold">[V]</span>OICE:
+               <select 
+                 value={voice} 
+                 onChange={(e) => handleVoiceChange(e.target.value)} 
+                 className="bg-black text-blue-300 font-bold ml-1 outline-none uppercase cursor-pointer"
+               >
+                 {VOICES.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+               </select>
+             </span>
           </div>
         </div>
 
