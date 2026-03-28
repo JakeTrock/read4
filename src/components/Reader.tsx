@@ -47,7 +47,16 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
   
   const generationIdRef = useRef(0);
   const wordUpdateTimerRef = useRef<number | null>(null);
-  const preloadedNextAudioRef = useRef<{ text: string, audio: HTMLAudioElement | null } | null>(null);
+  const audioBufferQueueRef = useRef<{
+    id: string, 
+    audio: HTMLAudioElement, 
+    text: string,
+    chapterIdx: number,
+    paraIdx: number,
+    sentenceIdx: number
+  }[]>([]);
+  
+  const isBufferingRef = useRef(false);
 
   const currentChapter = book.content[chapterIdx] || [];
   const currentPara = currentChapter[paraIdx] || '';
@@ -86,45 +95,82 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
     }
   }, []);
 
+  const fillBuffer = useCallback(async () => {
+    if (isBufferingRef.current || !isPlayingRef.current) return;
+    isBufferingRef.current = true;
+
+    try {
+      const BUFFER_SIZE = 5;
+      const needed = BUFFER_SIZE - audioBufferQueueRef.current.length;
+      if (needed <= 0) return;
+
+      let currC = chapterIdx, currP = paraIdx, currS = sentenceIdx + 1;
+      if (audioBufferQueueRef.current.length > 0) {
+        const last = audioBufferQueueRef.current[audioBufferQueueRef.current.length - 1];
+        currC = last.chapterIdx;
+        currP = last.paraIdx;
+        currS = last.sentenceIdx + 1;
+      }
+
+      const toFetch: {text: string, c: number, p: number, s: number}[] = [];
+      while (toFetch.length < needed) {
+        const chapter = book.content[currC];
+        if (!chapter) break;
+        const para = chapter[currP];
+        if (!para) { currC++; currP = 0; currS = 0; continue; }
+        const sentences = splitIntoSentences(para);
+        if (currS >= sentences.length) { currP++; currS = 0; continue; }
+        
+        toFetch.push({ text: sentences[currS], c: currC, p: currP, s: currS });
+        currS++;
+      }
+
+      for (const item of toFetch) {
+        if (!isPlayingRef.current) break;
+        const sanitized = sanitizeTextForTTS(item.text);
+        if (!sanitized) continue;
+        const audio = await generate(sanitized, voice);
+        if (audio) {
+          audio.playbackRate = playbackSpeedRef.current;
+          audio.preload = "auto";
+          audioBufferQueueRef.current.push({
+            id: `${item.c}-${item.p}-${item.s}`,
+            audio,
+            text: item.text,
+            chapterIdx: item.c,
+            paraIdx: item.p,
+            sentenceIdx: item.s
+          });
+        }
+      }
+    } finally {
+      isBufferingRef.current = false;
+    }
+  }, [book.content, chapterIdx, paraIdx, sentenceIdx, generate, voice]);
+
   const startWordTimer = useCallback((audio: HTMLAudioElement, text: string) => {
     stopWordTimer();
-    
     const totalChars = text.length;
     if (totalChars === 0) return;
-
     const wordBoundaries: number[] = [];
     const tokens = text.match(/\S+|\s+/g) || [];
-    
     let charCount = 0;
     tokens.forEach(token => {
-      if (/\S/.test(token)) {
-        wordBoundaries.push(charCount + token.length);
-      }
+      if (/\S/.test(token)) wordBoundaries.push(charCount + token.length);
       charCount += token.length;
     });
-
     const updateWordIdx = () => {
-      if (!audio || audio.paused || audio.ended) {
-        stopWordTimer();
-        return;
-      }
-
+      if (!audio || audio.paused || audio.ended) { stopWordTimer(); return; }
       const progress = audio.currentTime / audio.duration;
       const currentCharPos = progress * totalChars;
-      
       let foundIdx = 0;
       for (let i = 0; i < wordBoundaries.length; i++) {
-        if (currentCharPos <= wordBoundaries[i]) {
-          foundIdx = i;
-          break;
-        }
+        if (currentCharPos <= wordBoundaries[i]) { foundIdx = i; break; }
         foundIdx = i;
       }
-      
       setWordIdx(foundIdx);
       wordUpdateTimerRef.current = requestAnimationFrame(updateWordIdx);
     };
-
     wordUpdateTimerRef.current = requestAnimationFrame(updateWordIdx);
   }, [stopWordTimer]);
 
@@ -148,64 +194,38 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
     handleNextSentenceRef.current = handleNextSentence;
   }, [handleNextSentence]);
 
-  const prefetchNext = useCallback((nextText: string) => {
-    if (!nextText) return;
-    const sanitized = sanitizeTextForTTS(nextText);
-    if (!sanitized) return;
-    if (preloadedNextAudioRef.current?.text === nextText) return;
-    if (preloadedNextAudioRef.current?.audio) {
-      releaseAudio(preloadedNextAudioRef.current.audio);
-    }
-    preloadedNextAudioRef.current = { text: nextText, audio: null };
-    generate(sanitized, voice).then(audio => {
-      if (preloadedNextAudioRef.current?.text === nextText) {
-        preloadedNextAudioRef.current.audio = audio;
-      } else if (audio) {
-        releaseAudio(audio);
-      }
-    }).catch(e => console.error("Prefetch error", e));
-  }, [generate, voice]);
-
-  const playSentence = useCallback(async (text: string) => {
-    if (!text) {
-      if (isPlayingRef.current) handleNextSentenceRef.current();
-      return;
-    }
-    if (currentAudio.current && currentAudioTextRef.current === text) {
+  const playSentence = useCallback(async (text: string, forceRegenerate = false) => {
+    if (!text) { if (isPlayingRef.current) handleNextSentenceRef.current(); return; }
+    if (!forceRegenerate && currentAudio.current && currentAudioTextRef.current === text) {
       try {
         currentAudio.current.playbackRate = playbackSpeedRef.current;
         await currentAudio.current.play();
         startWordTimer(currentAudio.current, text);
+        fillBuffer();
         return;
       } catch (e) {}
     }
-
     const currentGenId = ++generationIdRef.current;
     try {
-      if (currentAudio.current) {
-        releaseAudio(currentAudio.current);
-        currentAudio.current = null;
-        currentAudioTextRef.current = null;
-      }
+      if (currentAudio.current) { releaseAudio(currentAudio.current); currentAudio.current = null; currentAudioTextRef.current = null; }
       stopWordTimer();
       setWordIdx(-1);
-      
-      const sanitized = sanitizeTextForTTS(text);
-      if (!sanitized) {
-         if (isPlayingRef.current) handleNextSentenceRef.current();
-         return;
-      }
       let audio: HTMLAudioElement | null = null;
-      if (preloadedNextAudioRef.current?.text === text && preloadedNextAudioRef.current?.audio) {
-        audio = preloadedNextAudioRef.current.audio;
-        preloadedNextAudioRef.current = null;
-      } else {
+      if (audioBufferQueueRef.current.length > 0) {
+        const head = audioBufferQueueRef.current[0];
+        if (head.chapterIdx === chapterIdx && head.paraIdx === paraIdx && head.sentenceIdx === sentenceIdx) {
+          audio = head.audio;
+          audioBufferQueueRef.current.shift();
+        }
+      }
+      if (!audio) {
+        audioBufferQueueRef.current.forEach(item => releaseAudio(item.audio));
+        audioBufferQueueRef.current = [];
+        const sanitized = sanitizeTextForTTS(text);
+        if (!sanitized) { if (isPlayingRef.current) handleNextSentenceRef.current(); return; }
         audio = await generate(sanitized, voice);
       }
-      if (currentGenId !== generationIdRef.current || !isPlayingRef.current) {
-        releaseAudio(audio);
-        return;
-      }
+      if (currentGenId !== generationIdRef.current || !isPlayingRef.current) { releaseAudio(audio); return; }
       if (audio) {
         audio.playbackRate = playbackSpeedRef.current;
         currentAudio.current = audio;
@@ -214,20 +234,19 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
           stopWordTimer();
           setWordIdx(-1);
           if (isPlayingRef.current) {
-            handleNextSentenceRef.current();
+            if (audioBufferQueueRef.current.length > 0) {
+              const next = audioBufferQueueRef.current[0];
+              setChapterIdx(next.chapterIdx);
+              setParaIdx(next.paraIdx);
+              setSentenceIdx(next.sentenceIdx);
+            } else {
+              handleNextSentenceRef.current();
+            }
           }
         };
-        let nextText = null;
-        if (sentenceIdx < currentSentences.length - 1) {
-          nextText = currentSentences[sentenceIdx + 1];
-        } else if (paraIdx < currentChapter.length - 1) {
-          nextText = splitIntoSentences(currentChapter[paraIdx + 1])[0];
-        } else if (chapterIdx < book.content.length - 1) {
-          nextText = splitIntoSentences(book.content[chapterIdx + 1][0] || '')[0];
-        }
-        if (nextText) prefetchNext(nextText);
         await audio.play();
         startWordTimer(audio, text);
+        fillBuffer();
       } else if (isPlayingRef.current) {
         handleNextSentenceRef.current();
       }
@@ -235,7 +254,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
       console.error('Playback error:', err);
       if (currentGenId === generationIdRef.current) setIsPlaying(false);
     }
-  }, [generate, voice, chapterIdx, paraIdx, sentenceIdx, currentSentences, currentChapter, book.content, prefetchNext, stopWordTimer, startWordTimer]);
+  }, [generate, voice, chapterIdx, paraIdx, sentenceIdx, stopWordTimer, startWordTimer, fillBuffer]);
 
   useEffect(() => {
     if (isPlaying) {
@@ -249,8 +268,8 @@ export const Reader: React.FC<ReaderProps> = ({ book, initialProgress, voice, on
   useEffect(() => {
     return () => {
       stopWordTimer();
+      audioBufferQueueRef.current.forEach(item => releaseAudio(item.audio));
       if (currentAudio.current) releaseAudio(currentAudio.current);
-      if (preloadedNextAudioRef.current?.audio) releaseAudio(preloadedNextAudioRef.current.audio);
     };
   }, [stopWordTimer]);
 
