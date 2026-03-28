@@ -1,0 +1,23 @@
+src/services/contentParser.ts
+  7d06a9be4bbd947b 3,8-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.21",
+  "base_commit_sha": "59a1749cef3559d288aaa1f3a381ecd1688f19ff",
+  "prompts": {
+    "7d06a9be4bbd947b": {
+      "agent_id": {
+        "tool": "gemini",
+        "id": "4f79fff8-ca6f-4dc4-9006-d8f1862243cc",
+        "model": "gemini-3-flash-preview"
+      },
+      "human_author": "Jacob Trock <jgh@geocrypt.me>",
+      "messages": [],
+      "total_additions": 3,
+      "total_deletions": 2,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    }
+  }
+}
