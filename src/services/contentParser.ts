@@ -1,11 +1,12 @@
 import { cleanVisualText } from '../utils/textProcessing';
 import * as pdfjs from 'pdfjs-dist';
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import epubjs from 'epubjs';
 import mammoth from 'mammoth';
 import MarkdownIt from 'markdown-it';
 
-// Set up PDF.js worker
-pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
+// Set up PDF.js worker using Vite asset URL
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
 export type Chapter = string[];
 export type BookContent = Chapter[];
